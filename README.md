@@ -98,7 +98,6 @@ npm run dev             # http://localhost:3001
 |---|---|
 | `GOOGLE_TRANSLATE_API_KEY` | Google Cloud Translation API key. Enable "Cloud Translation API" on the GCP project. |
 | `TRANSLATE_API_SECRET` | Shared secret callers send as `Authorization: Bearer <secret>`. Generate with `openssl rand -hex 32`. |
-| `ALLOWED_ORIGIN` | Browser CORS origin. Defaults to `*`. Server-to-server callers ignore it. |
 
 > **Never deploy without `TRANSLATE_API_SECRET`.** Every call costs money against
 > your Google quota, so the endpoint must not be open to the internet. The
@@ -107,6 +106,18 @@ npm run dev             # http://localhost:3001
 
 Restrict the Google API key itself too (GCP Console → Credentials → API
 restrictions → Cloud Translation API only).
+
+### CORS
+
+The API sends `Access-Control-Allow-Origin: *`, so a browser on any origin may
+call it. That is deliberate: callers are authenticated by their bearer token,
+not by their origin, and CORS is a browser-only control that never protected
+this endpoint.
+
+Note the consequence — for browser JavaScript to call this service, the secret
+has to be present in client-side code, where anyone can read it and spend your
+Google quota. Prefer calling it from your own server (as the main app does) and
+keeping the secret server-side.
 
 ## Calling it from the main app
 
