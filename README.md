@@ -1,116 +1,123 @@
 # Courtbook Translate
 
-Translation service extracted from the main Courtbook app. It serves Constitution
-of India entries, bare-act sections, subordinate-legislation sections and news
-posts in Indian languages, backed by the **Google Cloud Translation API (v2)**
-with a MongoDB-backed translation cache.
+A small HTTP service that wraps the **Google Cloud Translation API (v2)**, split
+out of the main Courtbook app so it can be deployed on its own domain.
 
-**Endpoint paths and response shapes are identical to the main app's**, so
-switching a client over is a host change only — no request or parsing changes.
+It holds exactly two things:
 
-## Endpoints
+1. The **Google Translate API key** and the call to Google.
+2. The **Indian legal abbreviation handling** that has to run before translation.
 
-| Endpoint | Notes |
+Everything else stays in the main app: the content, the models, the
+`*_translations` caches, and the logic deciding *when* to translate. This
+service is stateless — no database, no caching, no knowledge of Courtbook's
+domain objects.
+
+```
+courtbook (main app)                    translate (this service)
+  routes, models, caches      ── HTTP ──▶  expand abbreviations
+  decides when to translate                call Google
+  stores the result                        return text
+```
+
+## API
+
+### `POST /api/translate`
+
+```http
+POST /api/translate
+Authorization: Bearer <TRANSLATE_API_SECRET>
+Content-Type: application/json
+
+{ "q": ["<p>P&H High Court</p>", ""], "target": "hi", "source": "en", "format": "html" }
+```
+
+```json
+{ "success": true, "translations": ["<p>पंजाब और हरियाणा उच्च न्यायालय</p>", null] }
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `q` | yes | Array of strings, max 128 (Google's per-request cap). |
+| `target` | yes | Target language code, e.g. `hi`. |
+| `source` | no | Defaults to `en`. |
+| `format` | no | `html` (default) or `text`. |
+
+`translations` always has the **same length and ordering as `q`**. Entries that
+were empty or not strings come back as `null`, so the caller can zip the result
+straight back onto its original field positions. An all-empty `q` returns nulls
+without calling Google at all.
+
+| Status | Meaning |
 |---|---|
-| `GET /api/health` | Liveness + config check |
-| `GET /api/constitution-of-india/hierarchy` | `?lang=` (or `lang=all`), `type=`, `sections=false` |
-| `GET /api/constitution-of-india/entries` | `?parent_id=` (required), `section_id=`, `tr=`, `page=`, `limit=` |
-| `GET /api/constitution-of-india/entries/[id]` | `?tr=` |
-| `GET /api/bare-acts/sections` | `?act_id=` (required), `chapter_id=`, `chapter_item_id=`, `query=`, `tr=` |
-| `GET /api/bare-acts/sections/[id]` | `?tr=` |
-| `GET /api/bare-acts/subordinate-sections` | `?subordinate_id=` (required), `tr=` |
-| `GET /api/bare-acts/subordinate-sections/[id]` | `?tr=` |
-| `GET /api/v2/posts/[slug]` | `?tr=` — slug, ObjectId or WordPress ID |
+| `200` | Translated. |
+| `400` | Malformed body, bad `format`, missing `target`, or over 128 segments. |
+| `401` | Missing or wrong bearer token. |
+| `429` | Rate limited (120 requests/min per IP). |
+| `502` | Google rejected the request or the API key is missing. |
+| `503` | `TRANSLATE_API_SECRET` is not configured on the server. |
 
-Languages: `en, hi, gu, mr, pa, bn, or, ta, te, kn, ml, ne` (anything else falls back to `en`).
+### `GET /api/health`
 
-Note the inconsistency carried over from the original app: the hierarchy
-endpoint takes `?lang=`, every other endpoint takes `?tr=`.
+```json
+{ "ok": true, "translate_key_configured": true, "api_secret_configured": true }
+```
 
-## How translation resolves
+Returns `503` when either secret is missing. Worth wiring to your uptime check —
+a missing Google key makes every call fail, which callers experience as a silent
+fall back to untranslated text.
 
-**Detail endpoints** (`.../[id]`, `/api/v2/posts/[slug]`) resolve a non-English
-language in three steps, reported back in the `source` field:
-
-1. **Cache hit** in the relevant `*_translations` collection → served directly (`source: "cache"`).
-2. **Cache miss** → translated at runtime via Google, written to the cache, served (`source: "runtime"`).
-3. **Translation fails** → falls back to English (`source: "base"`).
-
-Responses carry both `requested_lang` and the actually-served `lang`, so a
-silent English fallback is always visible to the caller.
-
-**List endpoints** never trigger runtime translation. They only overlay titles
-already cached by the detail endpoints, and each item carries the `language` it
-was actually served in.
-
-Serving a cached translation stamps `last_read_at` with `timestamps: false`, so
-a read never bumps `updatedAt` (which tracks content changes).
-
-### Legal abbreviation expansion
+## Legal abbreviation expansion
 
 Google Translate misreads Indian legal `X&Y` abbreviations as foreign entities —
 `P&H High Court` comes back as "PH & Herzegovina High Court" in Hindi (confused
-with B&H / Bosnia and Herzegovina). `src/lib/googleTranslate.js` expands these to
-their full names *before* translation: `P&H`, `J&K`, `J&K&L`, `A&N`, `D&NH`.
-Ambiguous two-letter initialisms like `SC`/`HC` are deliberately left alone
-(SC = Supreme Court vs Scheduled Caste — context dependent).
+with B&H / Bosnia and Herzegovina). These are expanded to their full names
+*before* translation, which gives the engine real context:
 
-Content is translated as HTML (`format: 'html'`) so markup survives untouched.
-Posts are translated as one HTML blob rather than per Lexical text-leaf, because
-translating leaves independently breaks sentences apart wherever a link or bold
-span sits mid-sentence.
+| Input | Expanded to |
+|---|---|
+| `P&H` | Punjab and Haryana |
+| `J&K` | Jammu and Kashmir |
+| `J&K&L` | Jammu, Kashmir and Ladakh |
+| `A&N` | Andaman and Nicobar |
+| `D&NH` | Dadra and Nagar Haveli |
+
+`&amp;` is handled as well as `&`, since content is translated as HTML.
+Ambiguous two-letter initialisms like `SC`/`HC` are deliberately **not**
+expanded (SC = Supreme Court vs Scheduled Caste — context dependent).
 
 ## Setup
 
 ```bash
 npm install
-cp .env.example .env   # then fill in the values
-npm run dev            # http://localhost:3001
+cp .env.example .env    # then fill in the values
+npm run dev             # http://localhost:3001
 ```
-
-### Environment
 
 | Variable | Purpose |
 |---|---|
-| `MONGO_URI` | **Same database as the main Courtbook app.** Reads the English source collections, owns the `*_translations` caches. |
-| `GOOGLE_TRANSLATE_API_KEY` | Google Cloud Translation API key ("Cloud Translation API" must be enabled on the GCP project). |
-| `ALLOWED_ORIGIN` | Origin allowed to call the API cross-origin. Defaults to `*`. |
+| `GOOGLE_TRANSLATE_API_KEY` | Google Cloud Translation API key. Enable "Cloud Translation API" on the GCP project. |
+| `TRANSLATE_API_SECRET` | Shared secret callers send as `Authorization: Bearer <secret>`. Generate with `openssl rand -hex 32`. |
+| `ALLOWED_ORIGIN` | Browser CORS origin. Defaults to `*`. Server-to-server callers ignore it. |
 
-> **Without `GOOGLE_TRANSLATE_API_KEY` every runtime translation fails and each
-> endpoint silently falls back to English** (`source: "base"`). Cached
-> translations still serve fine. `GET /api/health` reports whether the key is set.
+> **Never deploy without `TRANSLATE_API_SECRET`.** Every call costs money against
+> your Google quota, so the endpoint must not be open to the internet. The
+> service refuses to serve (`503`) when the secret is unset rather than running
+> unauthenticated.
 
-## Collections
+Restrict the Google API key itself too (GCP Console → Credentials → API
+restrictions → Cloud Translation API only).
 
-Owned by this service (translation caches, one doc per `(entity_id, lang)`):
-`coi_translations`, `bareact_section_translations`,
-`subordinate_section_translations`, `post_translations`.
+## Calling it from the main app
 
-Read-only English sources shared with the main app: `coi_entries`,
-`coi_hierarchy`, `sections`, `subordinate_sections`, `posts`, `media`,
-`categories`, `cms_users`, `tags`.
+`src/lib/googleTranslate.js` in the main app is the client. It keeps the exact
+signature the old direct-to-Google function had, so the callers
+(`coiTranslate.js`, `bareActTranslate.js`, the news post route) were unchanged:
 
-Because both apps share one database, the main app keeps working unchanged while
-this service runs alongside it.
-
-## Layout
-
-```
-src/
-  app/api/…                 route handlers (paths mirror the main app exactly)
-  config/mongodb.js         pooled connection used by model/index.js
-  db/client.js              simple dbConnect used by the COI/bare-act routes
-  lib/googleTranslate.js    Google Translate client + abbreviation expansion
-  lib/coiTranslate.js       Constitution entry translator
-  lib/bareActTranslate.js   bare-act / subordinate section translator
-  lib/coi.js                language list, resolveLang, sorting helpers
-  lib/bareActSectionSort.js Roman-numeral-aware section sorting
-  lib/v2/lexicalToHtml.js   Payload Lexical → HTML
-  model/…                   mongoose models (sources + translation caches)
-  repositories-2/           post repository (lookups + recommendations)
+```js
+const [title, content] = await translateTexts([title, content], 'hi')
 ```
 
-There are two connection helpers because the original code had two: the news
-route reaches Mongo through `config/mongodb.js` (connect-on-import, pooled),
-while the COI and bare-act routes call `db/client.js` explicitly. Both share
-mongoose's single global connection.
+It needs `TRANSLATE_API_URL` and `TRANSLATE_API_SECRET` in the main app's
+environment, and throws on failure — which the existing callers already catch
+and handle by falling back to English.

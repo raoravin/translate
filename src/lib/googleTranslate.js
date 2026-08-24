@@ -44,9 +44,6 @@ export function expandLegalAbbreviations(text) {
 // zip the results back onto their original field positions.
 // ---------------------------------------------------------------------------
 export async function translateTexts(texts, targetLang, { format = 'html', sourceLang = 'en' } = {}) {
-  const apiKey = process.env.GOOGLE_TRANSLATE_API_KEY
-  if (!apiKey) throw new Error('GOOGLE_TRANSLATE_API_KEY is not configured')
-
   const indices = []
   const q = []
   texts.forEach((t, i) => {
@@ -55,7 +52,11 @@ export async function translateTexts(texts, targetLang, { format = 'html', sourc
       q.push(expandLegalAbbreviations(t))
     }
   })
+  // Nothing translatable — answer without needing a key or a network call.
   if (!q.length) return texts.map(() => null)
+
+  const apiKey = process.env.GOOGLE_TRANSLATE_API_KEY
+  if (!apiKey) throw new Error('GOOGLE_TRANSLATE_API_KEY is not configured')
 
   const res = await fetch(`${ENDPOINT}?key=${encodeURIComponent(apiKey)}`, {
     method: 'POST',

@@ -2,7 +2,7 @@
   "name": "courtbook-translate",
   "version": "0.1.0",
   "private": true,
-  "description": "Translation service for Courtbook — serves Constitution of India, bare-act, subordinate-legislation and news-post content in Indian languages, backed by the Google Cloud Translation API with a MongoDB-backed translation cache.",
+  "description": "Google Translate proxy for Courtbook — owns the Google Cloud Translation API key and the Indian legal abbreviation handling, exposed as a small HTTP API.",
   "scripts": {
     "dev": "next dev -p 3001",
     "build": "next build",
@@ -10,7 +10,6 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "mongoose": "^8.4.5",
     "next": "14.2.35",
     "rate-limiter-flexible": "^5.0.3",
     "react": "^18.3.1",
